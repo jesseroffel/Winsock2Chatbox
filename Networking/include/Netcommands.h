@@ -2,20 +2,22 @@
 
 namespace Networking
 {
-	enum class Netcommands
+	enum class NetCommands
 	{
-		Identify = 600,
+		Invalid = 600,
+		IdentifyBroadcast,
 		IdentifySuccessful,
 		IdentifyFailure,
 		Acknowledge,
-		AcknowledgeSuccess,
-		AcknowledgeFailure,
+		AcknowledgeComplete,
 		ChatCommand,
+		LostConnection,
 		Disconnect
 	};
 
 	enum class ChatCommands
 	{
+		Invalid = 700,
 		NameIdentify,
 		Chatmessage,
 		HeartbeatCheck,

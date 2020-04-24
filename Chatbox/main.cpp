@@ -9,41 +9,51 @@
 
 int main()
 {
-	Networking::Client client;
-	if (client.InitializeWSA())
+	//Check whether it's possible to run the chat which requires a second thread to be used to poll incoming messages while typing.
+	unsigned int threadsAvailable = 0;
+	threadsAvailable = std::thread::hardware_concurrency();
+	if (threadsAvailable < 2)
 	{
-		printf("[Setup] Unable to setup the chat.\n");
+		printf("[System] Chat setup failed because of not enough threads available, minimum required: 2. Amount of threads not supported: %u", threadsAvailable);
 		return 1;
 	}
-	if (client.InitializeSearchSocket())
+
+	//Setup WSA
+	Networking::Client client;
+	if (client.InitializeWSA() != Networking::ChatState::WSASetupSuccess)
 	{
+		printf("[System] WSA Initialization failed: unable to setup the chat.\n");
+		return 1;
+	}
+
+	//Setup Local network search socket, if this fails then this means the chat can't function at all.
+	if (client.InitializeSearchSocket() != Networking::ChatState::WSASetupSocketSuccess)
+	{
+		printf("[System] Socket Initialization failed: unable to setup the chat.\n");
 		client.Close();
 		return 1;
 	}
 
-	if (client.SetupChatbox())
+	//Chat loop
+	while (!client.quitApplication)
 	{
-		unsigned int threadsAvailable = 0;
-		threadsAvailable = std::thread::hardware_concurrency();
-		if (threadsAvailable < 2)
+		if (client.SetupOrJoinChat() != Networking::ChatState::SuccessfullySetup)
 		{
-			printf("[Thread] Amount of threads not supported: %u", threadsAvailable);
-			return 1;
+			continue;
 		}
-		else
+
+		if (client.parnerSetupReady)
 		{
 			std::thread inputThread(&Networking::Client::HandleChatInput, &client);
-			client.Chat();
-			if (inputThread.joinable())
-			{
-				inputThread.join();
-			}
-			client.Close();
+			client.HandleChatNetwork();
+			if (inputThread.joinable()) { inputThread.join(); }
+
+			client.AskForNewConnection();
 		}
-		
-		return 0;
 	}
 
+	//Cleanup
 	client.Close();
-	return 0;
+	return 0; 
+
 }

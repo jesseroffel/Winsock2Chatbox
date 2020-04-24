@@ -1,62 +1,64 @@
-#include "Responses.h"
 #include "Packet.h"
 #include "Netcommands.h"
 #include "Client.h"
+#include "Responses.h"
 
 namespace Networking
 {
-	bool Responses::HandlePacket(Packet&& packet)
+	ChatState Responses::HandlePacket(Packet&& packet)
 	{
 		unsigned int rawNetcommand = 0;
 		packet >> rawNetcommand;
 
-		auto netcommand = static_cast<Netcommands>(rawNetcommand);
+		NetCommands netcommand = static_cast<NetCommands>(rawNetcommand);
+		clientReference->SetNetCommandReceived(netcommand);
 
 		switch (netcommand)
 		{
-		case Netcommands::Identify:
-		{
-			return IdentifiedCorrectly(std::move(packet));
+			case NetCommands::IdentifyBroadcast:
+			{
+				return CheckHTTPURequest(std::move(packet));
+			}
+			case NetCommands::IdentifySuccessful:
+			{
+				return IdentifiedSuccessfully(std::move(packet));
+			}
+			case NetCommands::IdentifyFailure:
+			{
+				return ChatState::LocalIdentifyReceivedFailed;
+			}
+			case NetCommands::Acknowledge:
+			{
+				return ClientAcknowledged(std::move(packet));
+			}
+			case NetCommands::AcknowledgeComplete:
+			{
+				return ChatState::ClientAcknowledgeSuccess;
+			}
+			case NetCommands::ChatCommand:
+			{
+				return HandleChatpacket(std::move(packet));
+			}
+			case NetCommands::Disconnect:
+			case NetCommands::LostConnection:
+			{
+				clientReference->DisconnectUser();
+				return ChatState::ExitApplication;
+			}
 		}
-		case Netcommands::IdentifySuccessful:
-		{
-			return IdentifiedSuccessfully(std::move(packet));
-		}
-		case Netcommands::Acknowledge:
-		{
-			return AcknowledgeClient(std::move(packet));
-		}
-		case Netcommands::AcknowledgeSuccess:
-		{
-			return AcknowledgeClientSuccess(std::move(packet));
-		}
-		case Netcommands::AcknowledgeFailure:
-		{
-			return AcknowledgeClientFailure(std::move(packet));
-		}
-		case Netcommands::ChatCommand:
-		{
-			return HandleChatpacket(std::move(packet));
-		}
-		case Netcommands::Disconnect:
-		{
-			clientReference->DisconnectUser();
-			return true;
-		}
-		default:
-		{
-			printf("[Network] Received unknown packet\n\n");
-			return false;
-		}
-		}
+
+		//printf("[Network] Received unknown packet, netcommand: %u\n", rawNetcommand);
+		return ChatState::WSAReceivedInvalidPacket;
 	}
 
-	bool Responses::HandleChatpacket(Packet&& packet)
+	ChatState Responses::HandleChatpacket(Packet&& packet)
 	{
 		unsigned int rawChatCommand = 0;
 		packet >> rawChatCommand;
 
 		auto chatCommand = static_cast<ChatCommands>(rawChatCommand);
+		clientReference->SetChatCommandReceived(chatCommand);
+
 		switch (chatCommand)
 		{
 		case ChatCommands::NameIdentify:
@@ -69,25 +71,25 @@ namespace Networking
 		}
 		case ChatCommands::HeartbeatCheck:
 		{
-			printf("[Chat] Received Heartbeat request!\n");
-			return clientReference->SendHeartbeat();
+			//printf("[System] Received Heartbeat request!\n");
+			clientReference->SendHeartbeatResponse();
+			return ChatState::SendHeartbeat;
 		}
 		case ChatCommands::HeartbeatPulse:
 		{
-			printf("[Chat] Received Heartbeat response!\n");
-			return true;
+			return ChatState::HeartbeatReceived;
 		}
 		default:
 		{
-			printf("[Chat] Unknown chat command received!\n");
+			printf("[System] Unknown chat command received!\n");
 		}
 		}
-		return false;
+		return ChatState::FailedChatCommand;
 	}
 
-	bool Responses::IdentifiedCorrectly(Packet&& packet)
+	ChatState Responses::CheckHTTPURequest(Packet&& packet)
 	{
-		std::string checkHttpu = "";
+		std::string checkHttpu{};
 		const int totalLength = 96;
 		
 		packet >> checkHttpu;
@@ -96,93 +98,69 @@ namespace Networking
 		{
 			if (checkHttpu.length() == totalLength)
 			{
-				printf("[Network] Received HTTPU request\n");
-				//printf("\n%s", checkHttpu.c_str());
-				clientReference->SetIdentifiedSuccess(true);
-				return true;
+				return ChatState::LocalIdentifyValidHTTPU;
 			}
 		}
-		return false;
+		return ChatState::LocalIdentifiedFailed;
 	}
 
-	bool Responses::IdentifiedSuccessfully(Packet&& packet)
+	ChatState Responses::IdentifiedSuccessfully(Packet&& packet)
 	{
-		std::string responseString = "";
-		std::string ipToConnectWith = "";
-		packet >> responseString;
-		if (responseString.length() == 35)
+		// Host sending IP+Name to Client
+		std::string clientIp{}, clientName{};
+		packet >> clientIp;
+		packet >> clientName;
+		if (clientIp.empty() || clientName.empty())
 		{
-			packet >> ipToConnectWith;
-			printf("[Network] Found available chatbox with ip: %s!\n", ipToConnectWith.c_str());
-			//printf("\n%s\n", responseString.c_str());
-
-			clientReference->SetConnectionPartnerIP(ipToConnectWith);
-			return true;
+			return ChatState::LocalIdentifiedFailed;
 		}
-		return false;
+
+		clientReference->SetChatParnerIp(clientIp);
+		clientReference->SetChatParnerName(clientName);
+		return ChatState::LocalIdentifyReceivedSuccess;
 	}
 
-	bool Responses::AcknowledgeClient(Packet&& packet)
+	ChatState Responses::ClientAcknowledged(Packet&& packet)
 	{
-		std::string ipToConnectWith = "";
-		unsigned int chatPort = 0;
-		packet >> ipToConnectWith;
-		packet >> chatPort;
-		auto correctPort = static_cast<int>(chatPort);
-		if (!ipToConnectWith.empty() && chatPort != 0)
+		// Client sending IP+Name to Host
+		std::string clientIp{}, clientName{};
+		packet >> clientIp;
+		packet >> clientName;
+		if (clientIp.empty() || clientName.empty())
 		{
-			clientReference->SetConnectionPartnerIP(ipToConnectWith);
-			clientReference->SetConnectionPartnerPort(static_cast<u_short>(correctPort));
-			if (clientReference->TryToSetupTheChatConnection())
-			{
-				clientReference->BindChatPort();
-				clientReference->SetChatState(ChatState::SuccessfullySetup);
-				return true;
-			}
-			clientReference->SetChatState(ChatState::FailedToSetup);
-			return false;
+			return ChatState::LocalIdentifiedFailed;
 		}
-		return true;
+
+		clientReference->SetChatParnerIp(clientIp);
+		clientReference->SetChatParnerName(clientName);
+		return ChatState::ClientAcknowledged;
 	}
 
-	bool Responses::AcknowledgeClientSuccess(Packet&& packet)
+
+	ChatState Responses::ChatNameIdentification(Packet&& packet)
 	{
-		unsigned int tempPortGetter;
-		packet >> tempPortGetter;
-		u_short portToUse = 0;
-		portToUse = static_cast<u_short>(tempPortGetter);
-		printf("[Network] %s:%i is ready for chat!\n", clientReference->GetConnectionPartnerIp().c_str(), portToUse);
-		return clientReference->SetConnectionPartnerPort(portToUse);
+		std::string newChatName{};
+		packet >> newChatName;
+		if (newChatName.empty())
+		{
+			return ChatState::FailedChatCommand;
+		}
+		clientReference->SetChatParnerName(newChatName);
+		printf("[System] Partner changed the username: as: %s\n", newChatName.c_str());
+
+		return ChatState::ChatCommandReceived;
 	}
 
-	bool Responses::AcknowledgeClientFailure(Packet&& packet)
+	ChatState Responses::ChatMessage(Packet&& packet)
 	{
-		packet.Clear();
-		printf("[Network] %s wasn't able to start a chat connection successfully.\n", clientReference->GetConnectionPartnerIp().c_str());
-		return true;
-	}
-
-	bool Responses::ChatNameIdentification(Packet&& packet)
-	{
-		std::string name;
-		packet >> name;
-		printf("[Chat] Other client identified as: %s\n", name.c_str());
-		clientReference->SetChatParnerName(name);
-		return true;
-	}
-
-	bool Responses::ChatMessage(Packet&& packet)
-	{
-		std::string username = "";
-		std::string messageReceived = "";
-		packet >> username;
+		std::string messageReceived{};
 		packet >> messageReceived;
-		if (!username.empty() || !messageReceived.empty())
+		if (!messageReceived.empty())
 		{
-			printf("[%s]: %s\n", username.c_str(), messageReceived.c_str());
-			return true;
+			printf("[%s]: %s\n", clientReference->GetChatParnetName().c_str(), messageReceived.c_str());
+			return ChatState::ChatCommandReceived;
 		}
-		return false;
+		return ChatState::FailedChatCommand;
 	}
 
 }

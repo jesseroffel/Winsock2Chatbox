@@ -6,86 +6,111 @@
 #include <atomic>
 #include "Packet.h"
 #include "Responses.h"
+#include "ChatboxStates.h"
+#include "Netcommands.h"
 
 namespace Networking
 {
 	class Client
 	{
 	public:
+		bool parnerSetupReady = false;
+		bool heartBeatCheck = false;
+		bool quitApplication = false;
+
 		Client();
 		~Client() = default;
 
-		int InitializeWSA();
-		int InitializeSearchSocket();
-		int SetupChatbox();
-		int SearchForLocalChatbox();
-		int SetupLocalChatbox();
+		//Initialize functions
+		ChatState InitializeWSA();
+		ChatState InitializeSearchSocket();
+		ChatState SetupOrJoinChat();
+		ChatState SetupLocalChatbox();
+		ChatState JoinChatbox();
+		
+		// Handling states
+		ChatState VerifyJoiningClient();
+		ChatState EstablishConnectionWithHost();
+		ChatState SendIdentifyLocalNetwork();
 
-		int Chat();
+		int HandleChatNetwork();
 		void HandleChatInput();
-		int BindChatPort();
 		void Close();
 
 
-		// Handling
-		void SetIdentifiedSuccess(bool state) { identifiedSuccessfully = state; }
-		bool SetConnectionPartnerIP(std::string& connectionIP);
-		const std::string& GetConnectionPartnerIp() { return otherUserIp; }
-		bool SetConnectionPartnerPort(u_short port);
-		bool TryToSetupTheChatConnection();
-		void SetChatState(ChatState newState) { chatState = newState; }
+		//Packet Wrapper
+		ChatState Send(Packet packet, sockaddr_in& address);
+		ChatState Receive(WORD timeout, sockaddr_in& address);
+		//Packet info setting
+		void SetNetCommandReceived(NetCommands command) { lastNetCommand = command; }
+		void SetChatCommandReceived(ChatCommands command) { lastChatCommand = command; }
 
+		void SetParnerSetupReady(bool state) { parnerSetupReady = state; }
+		bool SetConnectionPartnerIP(std::string& connectionIP);
+		const std::string& GetConnectionPartnerIp() { return connection.partnerIp; }
+		void SetChatCompanionFound(bool state) { suitableChatCompanionFound = state; }
+		void SetHeartbeatReceived(bool state) { heartbeatReceived = state; }
+		
 		void SendChatUsername();
-		void SetChatParnerName(std::string& nameToSet);
-		int SendHeartbeat();
-		int HeartbeatReceived();
+		void SetChatParnerName(std::string& nameToSet) { connection.partnerName = nameToSet; }
+		void SetChatParnerIp(std::string& ipToSet) { connection.partnerIp = ipToSet; }
+		void SendHeartbeatCheck();
+		void SendHeartbeatResponse();
 		void DisconnectUser();
 		void LostConnection();
+		void ChatProblemOccurred();
+		void AskForNewConnection();
 		std::string& GetChatParnetName();
 
 	private:
 		Responses responseHandler{};
+		connected_user connection{};
 		SOCKET ssdpListenSocket = INVALID_SOCKET;		// to search // be found
-		SOCKET chatSocket = INVALID_SOCKET;				// to chat
+		DWORD totalEvents = 0;
 
-		WSAOVERLAPPED overlapped{};
-		sockaddr_in ssdpListenAddr{};
-		sockaddr_in chatListenAddr{};
+		WSAEVENT wsaEvents[WSA_MAXIMUM_WAIT_EVENTS];
+		DWORD wsaEventCount = 0;
+		WSAOVERLAPPED ssdrOverlapped{};
+		WSAOVERLAPPED sendingOverlapped{};
+		WSAOVERLAPPED receivingOverlapped{};
 		WSADATA wsaReturn{};
 
 		const std::string ssdpRequestString = 
 			"M-SEARCH * HTTP/1.1\r\n"
 			"HOST: 239.255.255.250:1900\r\n"
-			"ST: rakas:chat\r\n"
+			"ST: sampo:chat\r\n"
 			"MAX: \"ssdp:discover\"\r\n"
 			"MX: 3\r\n\r\n";
+		const std::string googleIp = "8.8.8.8";
 
-		int standardBufferSize = 0xFFFF;
+
+		const int standardBufferSize = 0xFFFF;
+		const int backupSeekPort = 3553;
+		const int clientSize = sizeof(sockaddr_in);
+		const WORD setupTimeout = 0x1000;
+		WORD chatTimeout = 0x2710;
+		const u_short googlePort = 53;
+		const u_short chatPort = 29640;
+
+		//Received states
+		ChatState lastChatState = ChatState::NotSet;
+		ChatState lastSendState = ChatState::NotSet;
+		ChatState lastReceiveState = ChatState::NotSet;
+		NetCommands lastNetCommand = NetCommands::Invalid;
+		ChatCommands lastChatCommand = ChatCommands::Invalid;
 
 		//Information related to connect to chat with
 		bool chatboxSetup = false;
-		bool identifiedSuccessfully = false;
+		bool suitableChatCompanionFound = false;
 		bool receivedPossibleConnected = false;
-		ChatState chatState = ChatState::NotSet;
-
-		connected_user otherUser{};
-		std::string otherUserIp = "";
-		std::string userName = "";
-		const int hostPort = 6464;
-		const int recPort = 6465;
-		int chatPortUsed = 0;
-		int chatTimeout = 0x2710;
-		bool hostingChatbox = false;
+		bool heartbeatReceived = false;
 
 		//Multi-threading
 		std::atomic<bool> ReadInput = false;
 
-		//int ReceivePackage(SOCKET& targetSocket, sockaddr_in& targetsockaddr, char* buffer);
-		//int SendPackage(SOCKET& targetSocket, sockaddr_in& targetsockaddr, Packet& packet);
-
-		int SendChatSocketSetup();
 		int SetChatTimeout(int value);
 
+		SOCKET* GetCurrentActiveSocket();
 		
 	};
 }

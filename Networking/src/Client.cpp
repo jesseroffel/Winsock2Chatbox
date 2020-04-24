@@ -2,497 +2,495 @@
 #include "Netcommands.h"
 #include <iostream>
 
-
-Networking::Client::Client()
-	
+namespace Networking
 {
+	Client::Client() {}
 
-}
-
-int Networking::Client::InitializeWSA()
-{
-	if (Networking::StartupWSA(0x202, wsaReturn)) { return 1; }
-	if (Networking::SetupOverlapEventHandle(overlapped)) { return 1; }
-
-	return 0;
-}
-
-int Networking::Client::InitializeSearchSocket()
-{
-	if (Networking::SetupSocket(ssdpListenSocket, AF_INET, SOCK_STREAM, connectionProtocol::UDP)) { return 1; }
-
-	if (Networking::SetSocketTimeout(ssdpListenSocket, 0xBB8)) { return 1; }
-
-	if (Networking::SetSocketReuseAble(ssdpListenSocket, 1)) { return 1; }
-
-	if (Networking::SetSocketBroadcast(ssdpListenSocket)) { return 1; }
-
-	Networking::SetupSockAddrinfo(ssdpListenAddr, AF_INET, 1900, true);
-
-	responseHandler.SetClientReference(this);
-	return 0;
-}
-
-int Networking::Client::SetupChatbox()
-{
-	char name[25];
-	printf("[Chat] Please enter your username as identification.\n");
-	std::cin.getline(name, 25);
-	userName = name;
-
-	while (!chatboxSetup)
+	ChatState Client::InitializeWSA()
 	{
-		if (this->SearchForLocalChatbox() != 0)
-		{
-			printf("[Chat] Available chatbox found!\n");
-			chatboxSetup = true;
+		if (!StartupWSA(0x202, wsaReturn)) 
+		{ 
+			return ChatState::WSAStartupFailed; 
 		}
-		else
-		{
-			printf("[Chat] No available chatbox found.\n");
-			if (SetupLocalChatbox())
-			{
-				chatState = ChatState::FailedToSetup;
-				WSACleanup();
-			}
-			chatboxSetup = true;
+		if (!SetupOverlapEventHandle(ssdrOverlapped)) 
+		{ 
+			return ChatState::WSAOverlapEventFailed; 
 		}
-	}
-	if (chatState == ChatState::FailedToSetup || chatState == ChatState::NotSet)
-	{
-		return 0;
+
+		return ChatState::WSASetupSuccess;
 	}
 
-	chatListenAddr.sin_port = htons(static_cast<u_short>(chatPortUsed));
-
-	printf("[Chat] You're connected! Type to send a message.\n");
-	//No longer needed to keep this up to date.
-	closesocket(ssdpListenSocket);
-	return 1;
-}
-
-int Networking::Client::SearchForLocalChatbox()
-{
-	printf("[Network] Sending ping to nearby open chatbox...\n");
-
-	Packet identifyPacket;
-	auto netCommand = static_cast<unsigned int>(Netcommands::Identify);
-	identifyPacket << netCommand;
-	identifyPacket << ssdpRequestString;
-
-	if (Networking::SendPacket(ssdpListenSocket, overlapped, ssdpListenAddr, identifyPacket) != 0) { return 1; }
-
-	auto* buffer = (char*)malloc(standardBufferSize);
-	Packet identifyResponse;
-	if (Networking::ReceivePacket(ssdpListenSocket, overlapped, ssdpListenAddr, identifyResponse) != 0)
+	ChatState Client::InitializeSearchSocket()
 	{
-		responseHandler.HandlePacket(std::move(identifyResponse));
-		if (receivedPossibleConnected)
-		{
-			//Setup port
-			if (!TryToSetupTheChatConnection())
-			{
-				printf("[Network] Couldn't complete chat setup..\n");
-				return 1;
-			}
+		if (!SetupSocket(ssdpListenSocket, AF_INET, SOCK_STREAM, ConnectionProtocolUsed::TCP, WSA_FLAG_OVERLAPPED))
+		{ 
+			return ChatState::WSASetSocketSetupFailed; 
+		}
+		if (!SetSocketReuseAble(ssdpListenSocket, 1)) {
+			return ChatState::WSASetSocketReusableFailed; 
+		}
 
-			Packet acknowledgePacket;
-			netCommand = static_cast<unsigned int>(Netcommands::Acknowledge);
-			std::string connectIp = Networking::GetAddressToString(&ssdpListenAddr);
-			chatPortUsed = recPort;
-			auto portToSend = static_cast<unsigned int>(chatPortUsed);
-			acknowledgePacket << netCommand;
-			acknowledgePacket << connectIp;
-			acknowledgePacket << portToSend;
-			if (Networking::SendPacket(ssdpListenSocket, overlapped, ssdpListenAddr, acknowledgePacket) != 0)
+		//if (!SetSocketTimeout(ssdpListenSocket, 0xBB8)) { return ChatState::WSASetSocketTimeoutFailed; }
+		//if (!SetSocketBroadcast(ssdpListenSocket, true)) { return ChatState::WSASetSocketBroadcastFailed; }
+
+		SetupSockAddrinfo(connection.listenAddress, AF_INET, googleIp, googlePort, false);
+		connection.userIp = AttemptToFetchLocalNetworkAddress(ssdpListenSocket, connection.listenAddress);
+		if (connection.userIp.empty())
+		{
+			printf("[System] Unable to test network connection.\n");
+			return ChatState::WSASetSocketSetupFailed;
+		}
+
+		responseHandler.SetClientReference(this);
+
+		printf("[System] Please enter your username... (25 characters max)\n");
+		char name[25];
+		std::cin.getline(name, 25);
+		connection.name = name;
+
+		return ChatState::WSASetupSocketSuccess;
+	}
+
+
+	Networking::ChatState Client::SetupOrJoinChat()
+	{
+		bool HostingChatboxAnswer = false;
+		std::string answer;
+		unsigned char firstChar = 0;
+		while (!HostingChatboxAnswer)
+		{
+			printf("[System] Would you like to host or join a chatbox? [H/J]\n");
+			std::cin >> std::ws;	//Remove whitespace
+			std::getline(std::cin, answer);
+			if (answer.empty()) { continue; }
+			firstChar = static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(answer[0])));
+			if (firstChar == 'H' || firstChar == 'J')
 			{
-				printf("[Network] Waiting 10 seconds for the host to setup a chat..\n");
-				if (Networking::SetSocketTimeout(ssdpListenSocket, chatTimeout))
-				{
-					printf("[Network] Unable to wait, closing connection..\n");
-					return 0;
-				}
-				Packet acknowledgeResponse;
-				if (Networking::ReceivePacket(ssdpListenSocket, overlapped, ssdpListenAddr, acknowledgeResponse) != 0)
-				{
-					responseHandler.HandlePacket(std::move(acknowledgeResponse));
-					// RESPOND TO CHAT SuccessfullySetup OR FailedToSetup
-					if (TryToSetupTheChatConnection())
-					{
-						printf("[Network] Client set up correctly to connect with chat partner.\n");
-						SetChatState(ChatState::SuccessfullySetup);
-						BindChatPort();
-						return 1;
-					}
-					else
-					{
-						printf("[Network] Client wasn't able to start a chat connection.\n");
-						SetChatState(ChatState::FailedToSetup);
-						return 0;
-					}
-				}
-				else
-				{
-					printf("[Network] Other client didn't respond to setup a connection..\n");
-					return 0;
-				}
+				HostingChatboxAnswer = true;
 			}
 		}
-	}
-	free(buffer);
-	return 0;
-}
 
-int Networking::Client::SetupLocalChatbox()
-{
-	if (Networking::SetupSocket(ssdpListenSocket, AF_INET, SOCK_STREAM, connectionProtocol::UDP))
-	{
-		return 1;
+		//Hosting chatbox
+		if (firstChar == 'H')
+		{
+			ChatState hostingState = SetupLocalChatbox();
+			if (hostingState != ChatState::WSAAcceptSuccess)
+			{
+				printf("[System] Something went wrong with setting up a connection... disconnected.\n");
+				return hostingState;
+			}
+			ChatState verificationState = VerifyJoiningClient();
+			if (verificationState != ChatState::LocalAvailableChatFound)
+			{
+				printf("[System] Something went wrong with establishing a connection... disconnected.\n");
+				return hostingState;
+			}
+
+			//Host checks up on connected client earlier
+			chatTimeout -= 0xBB8;
+		}
+		else // Joining chatbox
+		{
+			ChatState connectionState = JoinChatbox();
+			if (connectionState != ChatState::WSAAcceptSuccess)
+			{
+				printf("[System] Something went wrong with setting up a connection... disconnected.\n");
+				return connectionState;
+			}
+
+			ChatState establishState = EstablishConnectionWithHost();
+			if (establishState != ChatState::LocalAvailableChatFound)
+			{
+				printf("[System] Something went wrong with establishing a connection... disconnected.\n");
+				return establishState;
+			}
+		}
+
+		//Switch to ChatSocket
+		//ssdpListenSocket = ssdpListenSocket;
+		
+		if (!SetSocketTimeout(ssdpListenSocket, chatTimeout)) 
+		{ 
+			return ChatState::FailedToSetup; 
+		}
+		printf("[System] You're connected! Type to send a message.\n");
+		parnerSetupReady = true;
+		return ChatState::SuccessfullySetup;
 	}
 
-	if (Networking::SetSocketTimeout(ssdpListenSocket, 0xBB8))
+	ChatState Client::SetupLocalChatbox()
 	{
+		//target for incoming
+		if (!SetupSocket(ssdpListenSocket, AF_INET, SOCK_STREAM, ConnectionProtocolUsed::TCP, WSA_FLAG_OVERLAPPED))
+		{
+			return ChatState::WSASetSocketSetupFailed;
+		}
+		// 		if (!SetSocketTimeout(ssdpListenSocket, 0xBB8)) 
+		// 		{ 
+		// 			return ChatState::WSASetSocketTimeoutFailed; 
+		// 		}
+				//if (ssdpUnavailable) { SetupSockAddrinfo(ssdpListenAddr, AF_INET, static_cast<u_short>(backupSeekPort), false); }
+		SetupSockAddrinfo(connection.listenAddress, AF_INET, connection.userIp, chatPort, false);
+		if (!BindSocket(ssdpListenSocket, connection.listenAddress))
+		{
+			return ChatState::WSABindSocketFailed;
+		}
+		if (!ListenToSocket(ssdpListenSocket, 1))
+		{
+			return ChatState::WSAListenToSocketFailed;
+		}
+
+		//Accepting connection(s)
+		printf("[System] Chatbox is now waiting for a partner! You're available on: %s:%i\n", connection.userIp.c_str(), GetPortToNumber(&connection.listenAddress));
+		if (!AcceptSocket(ssdpListenSocket, connection.listenAddress, clientSize))
+		{
+			return ChatState::WSAAcceptFailed;
+		}
+
+		return ChatState::WSAAcceptSuccess;
+	}
+
+	ChatState Client::JoinChatbox()
+	{
+		if (!SetupSocket(ssdpListenSocket, AF_INET, SOCK_STREAM, ConnectionProtocolUsed::TCP, WSA_FLAG_OVERLAPPED))
+		{
+			return ChatState::WSASetSocketSetupFailed;
+		}
+		if (!SetSocketTimeout(ssdpListenSocket, setupTimeout))
+		{
+			return ChatState::WSASetSocketTimeoutFailed;
+		}
+		//if (ssdpUnavailable) { SetupSockAddrinfo(ssdpListenAddr, AF_INET, static_cast<u_short>(backupSeekPort), false); }
+		SetupSockAddrinfo(connection.listenAddress, AF_INET, connection.userIp, chatPort, false);
+		if (!ConnectToSocket(ssdpListenSocket, connection.listenAddress))
+		{
+			//Failed to connect
+			return ChatState::WSAConnectToSocketFailed;
+		}
+		return ChatState::WSAAcceptSuccess;
+	}
+
+	Networking::ChatState Client::VerifyJoiningClient()
+	{
+		//Wait for verification step
+		if (!SetSocketTimeout(ssdpListenSocket, setupTimeout))
+		{
+			return ChatState::WSASetSocketTimeoutFailed;
+		}
+		ChatState respond = Receive(setupTimeout, connection.listenAddress);
+		if (respond != ChatState::LocalIdentifyValidHTTPU)
+		{
+			printf("[System] Couldn't set up the identification with client..\n");
+			return respond;
+		}
+
+		printf("[System] Received valid HTTPU request to connect...\n");
+		Packet identifyPacket;
+		auto netCommand = static_cast<unsigned int>(NetCommands::IdentifySuccessful);
+		auto otherIp = static_cast<std::string>(connection.userIp);
+		auto nameToSend = static_cast<std::string>(connection.name);
+		identifyPacket << netCommand;
+		identifyPacket << otherIp;
+		identifyPacket << nameToSend;
+ 
+		//Send NetCommands::IdentifySuccessful
+ 		auto sendAcknowledgeStatus = Send(identifyPacket, connection.listenAddress);
+		if (sendAcknowledgeStatus != ChatState::WSASendPacketSuccess)
+		{
+			printf("[System] Couldn't send package to client to acknowledge..\n");
+			return sendAcknowledgeStatus;
+		}
+
+		//Receive NetCommands::Acknowledge
+		auto receiveAcknowledgeStatus = Receive(setupTimeout, connection.listenAddress);
+		if (receiveAcknowledgeStatus != ChatState::ClientAcknowledged)
+		{
+			printf("[System] Couldn't set up the connection with client..\n");
+			return receiveAcknowledgeStatus;
+		}
+		printf("[System] Incoming connection: %s from %s:%i\n", connection.partnerName.c_str(), connection.partnerIp.c_str(), GetPortToNumber(&connection.listenAddress));
+
+
+		//Send NetCommand:AcknowledgeComplete and switch
+		Packet acknowledgeCompletePacket;
+		netCommand = static_cast<unsigned int>(NetCommands::AcknowledgeComplete);
+		acknowledgeCompletePacket << netCommand;
+		auto sendAcknowledgeCompleteStatus = Send(acknowledgeCompletePacket, connection.listenAddress);
+		if (sendAcknowledgeCompleteStatus == ChatState::WSASendPacketSuccess)
+		{
+			return ChatState::LocalAvailableChatFound;
+		}
+
+		return ChatState::LocalNoAvailableChats;
+	}
+
+	Networking::ChatState Client::EstablishConnectionWithHost()
+	{
+		ChatState joinIdentifyPhase = SendIdentifyLocalNetwork();
+		if (joinIdentifyPhase != ChatState::LocalIdentifyReceivedSuccess)
+		{
+			printf("[System] Couldn't set up the identification with host..\n");
+			return joinIdentifyPhase;
+		}
+
+		printf("[System] Setting up connection with: %s on %s:%i\n", connection.partnerName.c_str(), connection.partnerIp.c_str(), GetPortToNumber(&connection.listenAddress));
+		//return name to host as part of the acknowledgement
+		Packet acknowledgePacket;
+		auto netCommand = static_cast<unsigned int>(NetCommands::Acknowledge);
+		auto otherIp = static_cast<std::string>(connection.userIp);
+		auto nameToSend = static_cast<std::string>(connection.name);
+		acknowledgePacket << netCommand;
+		acknowledgePacket << otherIp;
+		acknowledgePacket << nameToSend;
+		
+		//Send NetCommands::Acknowledge
+		auto sendAcknowledgeStatus = Send(acknowledgePacket, connection.listenAddress);
+		if (sendAcknowledgeStatus != ChatState::WSASendPacketSuccess)
+		{
+			printf("[System] Couldn't send package to host to acknowledge..\n");
+			return sendAcknowledgeStatus;
+		}
+
+		//Receive NetCommands::AcknowledgeSuccess/AcknowledgeFailure
+		auto receiveAcknowledgeStatus = Receive(setupTimeout, connection.listenAddress);
+		if (receiveAcknowledgeStatus != ChatState::ClientAcknowledgeSuccess)
+		{
+			printf("[System] Couldn't set up the connection with host..\n");
+		}
+		return ChatState::LocalAvailableChatFound;
+	}
+
+	void Client::Close()
+	{
+		shutdown(ssdpListenSocket, 2);
 		closesocket(ssdpListenSocket);
-		WSACleanup();
-		return 1;
-	}
-
-	if (Networking::SetSocketReuseAble(ssdpListenSocket, 1))
-	{
-		closesocket(ssdpListenSocket);
-		WSACleanup();
-		return 1;
-	}
-
-
-	Networking::SetupSockAddrinfo(ssdpListenAddr, AF_INET, 1900, false);
-
-	if (Networking::BindSocket(ssdpListenSocket, ssdpListenAddr))
-	{
-		closesocket(ssdpListenSocket);
-		WSACleanup();
-		return 1;
-	}
-
-	//target for incoming
-	SOCKADDR_IN ssdpAddr;
-	ssdpAddr.sin_family = AF_INET;
-	ssdpAddr.sin_port = htons(1900);
-	ssdpAddr.sin_addr.s_addr = INADDR_BROADCAST;
-
-	auto* buffer = (char*)malloc(standardBufferSize);
-
-	printf("[Network] Listening to other requests...\n");
-	bool suitableChatCompanionFound = false;
-	bool waitingForAsk = false;
-	hostingChatbox = true;
-	chatPortUsed = hostPort;
-	chatTimeout = chatTimeout - 0x400;
-	while (!suitableChatCompanionFound)
-	{
-		if (!waitingForAsk)
+		if (WSACleanup() != 0)
 		{
-			Packet waitForSuitableClientPacket{};
-			if (Networking::ReceivePacket(ssdpListenSocket, overlapped, ssdpListenAddr, waitForSuitableClientPacket) != 0)
-			{
-				responseHandler.HandlePacket(std::move(waitForSuitableClientPacket));
-				if (identifiedSuccessfully)
-				{
-					const std::string responseString = "HTTP/1.1 200 OK\r\nST: \"rakas:chat\"\r\n";
-
-					const std::string connectIp = Networking::GetAddressToString(&ssdpListenAddr);
-					if (!connectIp.empty())
-					{
-						Packet companionFoundReply;
-						auto netCommand = static_cast<unsigned int>(Netcommands::IdentifySuccessful);
-						companionFoundReply << netCommand;
-						companionFoundReply << responseString;
-						companionFoundReply << connectIp;
-						if (Networking::SendPacket(ssdpListenSocket, overlapped, ssdpListenAddr, companionFoundReply) != 0)
-						{
-							waitingForAsk = true;
-						}
-					}
-				}
-			}
-		}
-		else
-		{
-			//HOST RECEIVING CLIENT IP
-			Packet receivingAckPacket{};
-			if (Networking::ReceivePacket(ssdpListenSocket, overlapped, ssdpListenAddr, receivingAckPacket) != 0)
-			{
-				responseHandler.HandlePacket(std::move(receivingAckPacket));
-				SendChatSocketSetup();
-				suitableChatCompanionFound = true;
-			}
+			printf("[Winsock] Unable to Cleanup: %i", WSAGetLastError());
 		}
 	}
-	free(buffer);
-	return 0;
-}
 
-void Networking::Client::Close()
-{
-	shutdown(ssdpListenSocket, 2);
-	shutdown(chatSocket, 2);
-	closesocket(ssdpListenSocket);
-	closesocket(chatSocket);
-	if (WSACleanup() != 0)
+	ChatState Client::Send(Packet packet, sockaddr_in& address)
 	{
-	}
-	printf("[WINSOCK2] Unable to Cleanup: %i", WSAGetLastError());
-}
-
-int Networking::Client::SendChatSocketSetup()
-{
-	Packet setupPacket{};
-	if (chatState == ChatState::FailedToSetup)
-	{
-		auto netCommand = static_cast<unsigned int>(Netcommands::AcknowledgeFailure);
-		setupPacket << netCommand;
-		Networking::SendPacket(ssdpListenSocket, overlapped, ssdpListenAddr, setupPacket);
-		return 0;
-	}
-	if (chatState == ChatState::SuccessfullySetup)
-	{
-		auto netCommand = static_cast<unsigned int>(Netcommands::AcknowledgeSuccess);
-		auto portUsed = static_cast<unsigned int>(chatPortUsed);
-		setupPacket << netCommand;
-		setupPacket << portUsed;
-		Networking::SendPacket(ssdpListenSocket, overlapped, ssdpListenAddr, setupPacket);
-		return 1;
-	}
-	return 0;
-}
-
-int Networking::Client::SetChatTimeout(int value)
-{
-	if (Networking::SetSocketTimeout(chatSocket, value))
-	{
-		closesocket(chatSocket);
-		WSACleanup();
-		return false;
-	}
-	return true;
-}
-
-int Networking::Client::BindChatPort()
-{
-	if (Networking::BindSocket(chatSocket, otherUser.address))
-	{
-		printf("[Network] Chat socket failed to setup correctly.\n");
-		printf("[Network] Connected with: %s:%i\n", Networking::GetAddressToString(&otherUser.address).c_str(), Networking::GetPortToNumber(&otherUser.address));
-		closesocket(chatSocket);
-		WSACleanup();
-		return false;
-	}
-	
-	printf("[Network] Chat socket successfully set up.\n");
-	printf("[Network] Connected with: %s:%i\n", Networking::GetAddressToString(&otherUser.address).c_str(), Networking::GetPortToNumber(&otherUser.address));
-	return true;
-}
-
-bool Networking::Client::SetConnectionPartnerIP(std::string& connectionIP)
-{
-	otherUserIp = connectionIP;
-	int returnValue = Networking::GetAddressFromString(&ssdpListenAddr, connectionIP);
-	if (returnValue != 0)
-	{
-		otherUser.address.sin_addr.s_addr = returnValue;
-		chatListenAddr.sin_addr.s_addr = returnValue;
-		receivedPossibleConnected = true;
-	}
-	//otherUser.address.sin_addr.s_addr = inet_pton(connectionIP.c_str());
-	return false;
-}
-
-bool Networking::Client::SetConnectionPartnerPort(u_short port)
-{
-	if (port > 0)
-	{
-		otherUser.address.sin_port = htons(port);
-		return true;
-	}
-	return false;
-}
-
-bool Networking::Client::TryToSetupTheChatConnection()
-{
-	if (Networking::SetupSocket(chatSocket, AF_INET, SOCK_STREAM, connectionProtocol::UDP))
-	{
-		printf("[Network] Unable to create sockets!\n");
-		WSACleanup();
-		return false;
+		lastSendState = SendPacket(ssdpListenSocket, ssdrOverlapped, address, packet);
+		lastChatState = lastSendState;
+		return lastChatState;
 	}
 
-	if (Networking::SetSocketTimeout(chatSocket, chatTimeout))
+	ChatState Client::Receive(WORD timeout, sockaddr_in& address)
 	{
-		closesocket(chatSocket);
-		WSACleanup();
-		return false;
+		lastReceiveState = ReceivePacket(ssdpListenSocket, ssdrOverlapped, responseHandler, address, timeout);
+		lastChatState = lastReceiveState;
+		return lastChatState;
+	}
+
+	int Client::SetChatTimeout(int value)
+	{
+		return SetSocketTimeout(ssdpListenSocket, value);
 	}
 
 
-	if (Networking::SetSocketReuseAble(chatSocket, 1))
+	bool Client::SetConnectionPartnerIP(std::string& connectionIP)
 	{
-		closesocket(chatSocket);
-		WSACleanup();
-		return false;
-	}
-	if (otherUser.address.sin_addr.S_un.S_addr == 0)
-	{
-		closesocket(chatSocket);
-		WSACleanup();
-		return false;
-	}
-	else
-	{
-		otherUser.address.sin_family = AF_INET;
-		chatListenAddr.sin_family = AF_INET;
-	}
-
-	return true;
-}
-
-
-void Networking::Client::SendChatUsername()
-{
-	auto netCommand = static_cast<unsigned int>(Netcommands::ChatCommand);
-	auto chatCommand = static_cast<unsigned int>(ChatCommands::Chatmessage);
-	Packet chatSend;
-	chatSend << netCommand;
-	chatSend << chatCommand;
-	chatSend << userName;
-	Networking::SendPacket(chatSocket, overlapped, otherUser.address, chatSend);
-}
-
-void Networking::Client::SetChatParnerName(std::string& nameToSet)
-{
-	otherUser.name = nameToSet;
-}
-
-int Networking::Client::SendHeartbeat()
-{
-	Packet namePacket;
-	auto netCommand = static_cast<unsigned int>(Netcommands::ChatCommand);
-	auto chatCommand = static_cast<unsigned int>(ChatCommands::HeartbeatPulse);
-	namePacket << netCommand;
-	namePacket << chatCommand;
-	Networking::SendPacket(chatSocket, overlapped, otherUser.address, namePacket);
-	return 1;
-}
-
-int Networking::Client::HeartbeatReceived()
-{
-	Packet namePacket;
-	auto netCommand = static_cast<unsigned int>(Netcommands::ChatCommand);
-	auto chatCommand = static_cast<unsigned int>(ChatCommands::HeartbeatCheck);
-	namePacket << netCommand;
-	namePacket << chatCommand;
-	Networking::SendPacket(chatSocket, overlapped, otherUser.address, namePacket);
-
-	if (Networking::SetSocketTimeout(chatSocket, 0xD00))
-	{
-		closesocket(chatSocket);
-		WSACleanup();
-		return 0;
-	}
-	Packet chatReceive{};
-	if (Networking::ReceivePacket(chatSocket, overlapped, otherUser.address, chatReceive) != 0)
-	{
-		responseHandler.HandlePacket(std::move(chatReceive));
-		return 1;
-	}
-	return 0;
-}
-
-void Networking::Client::DisconnectUser()
-{
-	printf("[Chat] The other user left the chat, disconnecting..\n");
-	ReadInput = false;
-	chatState = ChatState::ChatClosed;
-}
-
-void Networking::Client::LostConnection()
-{
-	printf("[Chat] Lost connection...\n");
-	ReadInput = false;
-	chatState = ChatState::ChatClosed;
-}
-
-std::string& Networking::Client::GetChatParnetName()
-{
-	return otherUser.name;
-}
-
-void Networking::Client::HandleChatInput()
-{
-	ReadInput = true;
-	char textMessage[265];
-	do
-	{
-		std::cin.getline(textMessage, 265);
-		const std::string convertedMessage(textMessage);
-		if (convertedMessage.length() != 0)
+		connection.partnerIp = connectionIP;
+		int returnValue = GetAddressFromString(&connection.listenAddress, connectionIP);
+		if (returnValue != 0)
 		{
-			if (convertedMessage.front() != '.')
+			connection.listenAddress.sin_addr.s_addr = returnValue;
+			receivedPossibleConnected = true;
+		}
+		return false;
+	}
+
+	ChatState Client::SendIdentifyLocalNetwork()
+	{
+		//Send local network identify message
+		Packet identifyPacket;
+		auto netCommand = static_cast<unsigned int>(NetCommands::IdentifyBroadcast);
+		identifyPacket << netCommand;
+		identifyPacket << ssdpRequestString;
+
+		ChatState status = Send(identifyPacket, connection.listenAddress);
+		if (status != ChatState::WSASendPacketSuccess) { return ChatState::LocalIdentifyNetworkSendFailed; }
+
+		//Allocate buffer for possible response
+		//auto* buffer = (char*)malloc(standardBufferSize);
+		return Receive(setupTimeout, connection.listenAddress);
+	}
+
+	void Client::SendChatUsername()
+	{
+		Packet chatSend;
+		auto netCommand = static_cast<unsigned int>(NetCommands::ChatCommand);
+		auto chatCommand = static_cast<unsigned int>(ChatCommands::Chatmessage);
+		chatSend << netCommand;
+		chatSend << chatCommand;
+		chatSend << connection.name;
+		Send(chatSend, connection.listenAddress);
+	}
+
+	void Client::SendHeartbeatCheck()
+	{
+		Packet heartbeat;
+		auto netCommand = static_cast<unsigned int>(NetCommands::ChatCommand);
+		auto chatCommand = static_cast<unsigned int>(ChatCommands::HeartbeatCheck);
+		heartbeat << netCommand;
+		heartbeat << chatCommand;
+		Send(heartbeat, connection.listenAddress);
+	}
+
+	void Client::SendHeartbeatResponse()
+	{
+		Packet heartbeat;
+		auto netCommand = static_cast<unsigned int>(NetCommands::ChatCommand);
+		auto chatCommand = static_cast<unsigned int>(ChatCommands::HeartbeatPulse);
+		heartbeat << netCommand;
+		heartbeat << chatCommand;
+		Send(heartbeat, connection.listenAddress);
+	}
+
+	void Client::DisconnectUser()
+	{
+		printf("[System] %s left the chat, disconnecting...\n", connection.partnerName.c_str());
+		ReadInput = false;
+		lastChatState = ChatState::ChatClosed;
+		closesocket(ssdpListenSocket);
+	}
+
+	void Client::LostConnection()
+	{
+		printf("[System] Lost connection with %s, disconnecting...\n", connection.partnerName.c_str());
+		ReadInput = false;
+		lastChatState = ChatState::ChatClosed;
+		closesocket(ssdpListenSocket);
+	}
+
+	void Client::ChatProblemOccurred()
+	{
+		printf("[System] A problem occurred. Disconnecting..\n");
+		ReadInput = false;
+		lastChatState = ChatState::ChatClosed;
+		closesocket(ssdpListenSocket);
+	}
+
+	void Client::AskForNewConnection()
+	{
+		bool HostingChatboxAnswer = false;
+		std::string answer;
+		unsigned char firstChar = 0;
+		while (!HostingChatboxAnswer)
+		{
+			printf("[System] Would you like to host or join a chatbox? [Y/N]\n");
+			std::cin >> std::ws;	//Remove whitespace
+			std::getline(std::cin, answer);
+			if (answer.empty()) { continue; }
+			firstChar = static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(answer[0])));
+			if (firstChar == 'Y' || firstChar == 'N')
 			{
-				auto netCommand = static_cast<unsigned int>(Netcommands::ChatCommand);
-				auto chatCommand = static_cast<unsigned int>(ChatCommands::Chatmessage);
+				HostingChatboxAnswer = true;
+			}
+		}
+
+		if (firstChar == 'N')
+		{
+			quitApplication = true;
+		}
+
+		parnerSetupReady = false;
+		closesocket(ssdpListenSocket);
+		//Setup Local network search socket, if this fails then this means the chat can't function at all.
+		if (InitializeSearchSocket() != Networking::ChatState::WSASetupSocketSuccess)
+		{
+			printf("[System] Socket Initialization failed: unable to setup the chat.\n");
+			Close();
+			quitApplication = true;
+		}
+	}
+
+	std::string& Client::GetChatParnetName()
+	{
+		return connection.partnerName;
+	}
+
+	void Client::HandleChatInput()
+	{
+		ReadInput = true;
+		char textMessage[10000];
+
+		do
+		{
+			std::cin.getline(textMessage, 10000);
+			const std::string convertedMessage(textMessage);
+			if (convertedMessage.length() == 0)
+			{
+				continue;
+			}
+			if (convertedMessage.front() != '/')
+			{
 				Packet chatSend;
+				auto netCommand = static_cast<unsigned int>(NetCommands::ChatCommand);
+				auto chatCommand = static_cast<unsigned int>(ChatCommands::Chatmessage);
 				chatSend << netCommand;
 				chatSend << chatCommand;
-				chatSend << userName;
 				chatSend << convertedMessage;
-				Networking::SendPacket(chatSocket, overlapped, otherUser.address, chatSend);
-			}
-			else
-			{
-				if (strcmp(".disconnect", textMessage) == 0)
+				ChatState sendState = Send(chatSend, connection.listenAddress);
+				if (sendState != ChatState::WSASendPacketSuccess)
 				{
-					printf("[Chat] Disconnecting...\n");
-					auto netCommand = static_cast<unsigned int>(Netcommands::Disconnect);
-					Packet disconnectPacket;
-					disconnectPacket << netCommand;
-					Networking::SendPacket(chatSocket, overlapped, otherUser.address, disconnectPacket);
-					ReadInput = false;
-					chatState = ChatState::ChatClosed;
+					printf("[Chat] Unable to send message...\n");
 				}
-				else
-				{
-					printf("[Chat] Unknown command: %s\n", convertedMessage.c_str());
-				}
+				continue;
 			}
-		}
-	} while (ReadInput);
-}
 
-int Networking::Client::Chat()
-{
-	auto* buffer = (char*)malloc(0xFFFF);
-
-	while (chatState != ChatState::ChatClosed)
-	{
-		Packet chatReceive{};
-		if (Networking::ReceivePacket(chatSocket, overlapped, otherUser.address, chatReceive) != 0)
-		{
-			responseHandler.HandlePacket(std::move(chatReceive));
-		}
-		else
-		{
-			if (!HeartbeatReceived())
+			//Read chatcommands
+			if (strcmp("/disconnect", textMessage) == 0)
 			{
-				LostConnection();
+				printf("[System] Disconnecting...\n");
+				Packet disconnectPacket;
+				auto netCommand = static_cast<unsigned int>(NetCommands::Disconnect);
+				disconnectPacket << netCommand;
+				Send(disconnectPacket, connection.listenAddress);
+				ReadInput = false;
+				lastChatState = ChatState::ChatClosed;
+				continue;
 			}
-			else
-			{
-				SetChatTimeout(chatTimeout);
-			}
-		}
+			printf("[System] Unknown command: %s\n", convertedMessage.c_str());
+		} while (ReadInput);
 	}
-	free(buffer);
 
+	int Client::HandleChatNetwork()
+	{
+		bool checkHeartbeat = false;
+		while (lastChatState != ChatState::ChatClosed)
+		{
+			ChatState chatState = Receive(chatTimeout, connection.listenAddress);
+			if (chatState == ChatState::WSAReceivedNoBytes || chatState == ChatState::WSAReceiveFromFailed)
+			{
+				ChatProblemOccurred();
+				continue;
+			}
 
-	return 0;
+			if (chatState == ChatState::WSAReceiveTimeout)
+			{
+				if (!checkHeartbeat)
+				{
+					checkHeartbeat = true;
+					SendHeartbeatCheck();
+					continue;
+				}
+				//Lost conneciton
+				LostConnection();
+				continue;
+			}
+			if ((chatState == ChatState::ChatCommandReceived || chatState == ChatState::HeartbeatReceived) && checkHeartbeat)
+			{
+				checkHeartbeat = false;
+			}
+
+		}
+
+		//Close current chat and possibly ask for another one
+		parnerSetupReady = false;
+		return 0;
+	}
 }
+

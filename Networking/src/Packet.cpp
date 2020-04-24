@@ -8,7 +8,6 @@ namespace Networking
 
 	Packet::~Packet()
 	{
-
 	}
 
 	void Packet::Append(const void* data, std::size_t sizeInBytes)
